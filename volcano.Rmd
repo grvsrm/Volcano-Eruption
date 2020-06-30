@@ -1,0 +1,187 @@
+---
+title: "A multinomial classification model for Volcano Eruptions"
+author: "Gaurav Sharma"
+date: '`r Sys.Date() `'
+output: github_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE, warning = FALSE, message = FALSE, dpi = 180, fig.width = 8, fig.height = 5)
+library(tidyverse)
+library(tidymodels)
+
+```
+
+### Lets laod the data
+
+```{r}
+volcano_raw <- readr::read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-05-12/volcano.csv")
+volcano_raw %>% 
+    head(10) %>% 
+    knitr::kable()
+```
+
+### Lets now explore the data
+```{r}
+volcano_raw %>% 
+    count(primary_volcano_type, sort = T)
+```
+
+### It shows that there are 26 different types of valcanos. We will group them in three categories
+```{r}
+volcano_df <- volcano_raw %>% 
+    transmute(volcano_type = case_when(str_detect(primary_volcano_type, "Stratovolcano") ~ "Stratovolcano",
+                                       str_detect(primary_volcano_type, "Shield") ~ "Shield",
+                                       TRUE ~ "Others"),
+              volcano_number, latitude, longitude, tectonic_settings, elevation, major_rock_1) %>% 
+    mutate_if(is.character, factor)
+```
+
+### Since we have spatial data, Lets see where these volcanos are situated on a map
+
+```{r Volcano Map}
+world <- map_data("world")
+
+ggplot() +
+    geom_map(data = world, map = world,
+             aes(x = long, y = lat, map_id = region), color = "white", fill = "gray50", alpha = 0.2) +
+    geom_point(data = volcano_df, aes(longitude, latitude, color = volcano_type), alpha = 0.5) +
+    labs(x = NULL, y = NULL,
+         title = "Different Type of Volcanic Eruptions around the world") +
+    scale_x_continuous(labels = NULL) +
+    scale_y_continuous(labels = NULL) 
+    
+```
+
+### Rater than creating a split we will create resamples as we don't have much data
+```{r}
+volcano_boot <- volcano_df %>% 
+    bootstraps()
+volcano_boot
+```
+
+### We will create a recipe now. We will use smote analysis to overcome class imbalance
+smote() function is a part of themis package. So, remember to load themis package before creating recipe.
+```{r}
+library(themis)
+
+volcano_rec <- recipe(volcano_type~., data = volcano_df) %>% 
+    update_role(volcano_number, new_role = "id") %>% 
+    step_other(tectonic_settings) %>% 
+    step_other(major_rock_1) %>% 
+    step_dummy(tectonic_settings, major_rock_1) %>% 
+    step_zv(all_predictors()) %>% 
+    step_normalize(all_predictors()) %>% 
+    step_smote(volcano_type)
+
+volcano_prep <- prep(volcano_rec)
+
+```
+
+### Lets create a random forest model specification
+```{r}
+rf_spec <- rand_forest(trees = 1000) %>% 
+    set_engine(engine = "ranger") %>% 
+    set_mode(mode = "classification")
+```
+
+### Lets create a workflow
+```{r}
+volcano_wf <- workflow() %>% 
+    add_recipe(recipe = volcano_rec) %>% 
+    add_model(rf_spec)
+```
+
+### Lets train the model
+```{r}
+volcano_res <- fit_resamples(volcano_wf, 
+              resamples = volcano_boot,
+              control = control_resamples(save_pred = T, 
+                                          verbose = T))
+```
+
+### Explore results
+Let's see how the model 
+```{r}
+volcano_res %>% 
+    collect_metrics()
+```
+
+```{r}
+volcano_res %>% 
+    collect_predictions() %>% 
+    conf_mat(volcano_type, .pred_class)
+```
+
+```{r}
+volcano_res %>% 
+    collect_predictions() %>% 
+    ppv(volcano_type, .pred_class)
+```
+
+```{r}
+volcano_res %>% 
+    collect_predictions() %>% 
+    group_by(id) %>% 
+    ppv(volcano_type, .pred_class)
+```
+
+```{r Vip plot}
+library(vip)
+rf_spec %>%
+    set_engine("ranger", importance = "permutation") %>%
+    fit(
+        volcano_type ~ .,
+        data = juice(volcano_prep) %>% select(-volcano_number) %>% janitor::clean_names()
+    ) %>% 
+    vip(geom = "point")
+```
+
+
+```{r}
+volcano_pred <- volcano_res %>% 
+    collect_predictions() %>% 
+    mutate(correct = .pred_class == volcano_type) %>% 
+    left_join(volcano_df %>% 
+                  mutate(.row = row_number()))
+```
+
+# Lets see how we fared in terms of predictions by plotting our predictions again on a world map
+```{r Volcano Pred Plot}
+ggplot() +
+    geom_map(data = world, map = world,
+             aes(x = long, y = lat, map_id = region), color = "white", fill = "gray50", alpha = 0.5) +
+    stat_summary_hex(data = volcano_pred, aes(longitude, latitude, z = as.integer(correct)), 
+                     fun = "mean", alpha = 0.8, bins = 60) +
+    labs(x = NULL, y = NULL,
+         title = "On Average how accurate were our predictions across the world",
+         fill = "Percent correct") +
+    scale_x_continuous(labels = NULL) +
+    scale_y_continuous(labels = NULL) +
+    scale_fill_gradient(high = "cyan3", labels = scales::percent)
+ 
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
